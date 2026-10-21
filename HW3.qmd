@@ -1,0 +1,371 @@
+---
+title: "HW3"
+author: "Larry Cheng"
+format: 
+  html:
+    embed-resources: true
+---
+
+[Link to repo](https://github.com/LarryC-24/Homework-3)
+```{r}
+library(tidyverse)
+library(haven)
+library(pscl)
+library(knitr)
+library(emmeans)
+library(DBI)
+library(microbenchmark)
+```
+
+## Problem 1
+
+### Part a
+```{r}
+# Read data
+data1 <- read_xpt("data/AUX_I.xpt")
+data2 <- read_xpt("data/DEMO_I.xpt")
+
+# Merge dataframes
+df <- merge(data1, data2, by = "SEQN")
+# Dimensions
+dim(df)
+```
+### Part b
+```{r}
+# Cleaning columns
+# Gender
+df$RIAGENDR <- factor(df$RIAGENDR,
+                      levels = c(1, 2),
+                      labels = c("Male", "Female"))
+# Citizenship
+df$DMDCITZN[df$DMDCITZN != 1 & df$DMDCITZN != 2] <- NA
+df$DMDCITZN <- factor(df$DMDCITZN,
+                      levels = c(1, 2),
+                      labels = c("Citizen", "Noncitizen"))
+# Number of children <= 5 y.o. - no missing values
+
+# Household income
+df$INDHHIN2[df$INDHHIN2 == 77 | df$INDHHIN2 == 99] <- NA
+df$INDHHIN2 <- factor(df$INDHHIN2,
+                      levels = c(1:10, 12:15),
+                      labels = c("$0-$4,999", "$5,000-$9,999", "$10,000-$14,999", "$15,000-$19,999", "$20,000-$24,999", "$25,000-$34,999", "$35,000-$44,999", "$45,000-$54,999", "$55,000-$64,999", "$65,000-$74,999", ">=$20,000", "<$20,000", "$75,000-$99,999", ">=$100,000"))
+# Fix order as continuous
+df$INDHHIN2 <- as.numeric(factor(df$INDHHIN2,
+                      levels = c("$0-$4,999", "$5,000-$9,999", "$10,000-$14,999", "$15,000-$19,999", "<$20,000", ">=$20,000", "$20,000-$24,999", "$25,000-$34,999", "$35,000-$44,999", "$45,000-$54,999", "$55,000-$64,999", "$65,000-$74,999", "$75,000-$99,999", ">=$100,000")))
+```
+
+### Part c
+```{r}
+# Fit models
+model1 <- glm(AUXTWIDR ~ RIAGENDR, data = df, family = poisson)
+model2 <- glm(AUXTWIDR ~ RIAGENDR + DMDCITZN + DMDHHSZA + INDHHIN2, data = df, family = poisson)
+model3 <- glm(AUXTWIDL ~ RIAGENDR, data = df, family = poisson)
+model4 <- glm(AUXTWIDL ~ RIAGENDR + DMDCITZN + DMDHHSZA + INDHHIN2, data = df, family = poisson)
+```
+
+```{r}
+models <- list(model1, model2, model3, model4)
+# Extract IRR of coefficients
+irr <- sapply(models, function(x) {round(exp(coef(x)), digits = 2)})
+names(irr) <- c("model1", "model2", "model3", "model4")
+irr.df <- data.frame(lapply(irr, function(x) {
+  length(x) <- max(lengths(irr))
+  return(x)
+}))
+# Print table
+kable(irr.df, row.names = TRUE, caption = "IRR of Coefficients in each model")
+
+# Extract Statistics
+sizes <- sapply(models, nobs)
+psuedo_R2 <- sapply(models, function(x){round(pR2(x), digits = 5)})["McFadden",]
+AICs <- sapply(models, function(x){round(AIC(x), digits = 1)})
+
+# Print table
+stat_table <- data.frame(rbind(model = c("model1", "model2", "model3", "model4"), sizes = sizes, psuedo_R2 = psuedo_R2, AICs = AICs))
+kable(stat_table)
+```
+
+### Part d
+```{r}
+# Check p-value of coefficient
+print(summary(model4))
+# Predicted marginal means
+emm <- emmeans(model4, ~ RIAGENDR, type = "response")
+contrast(emm, method = "pairwise", type = "response")
+```
+:::{.callout-tip icon="false"}
+## Answer
+The p-value associated with the gender coefficient is less than 0.05, which is evidence for a difference between males and females in terms of IRR. The p-value associated with the difference of predicted value between males is also less than 0.05, suggesting the difference is significant.
+:::
+
+## Problem 2
+```{r}
+sakila <- dbConnect(RSQLite::SQLite(), "data/sakila_master.db")
+```
+
+### Part a
+```{r}
+# Extract table
+dbGetQuery(sakila, "
+SELECT store_id, active
+  FROM Customer
+") |> 
+# Calculate statistics
+  group_by(store_id) |> 
+  summarize(
+    n_cust = n(),
+    active_per = round(mean(as.numeric(active)), 2)
+  )
+
+# SQL query
+dbGetQuery(sakila, "
+SELECT store_id, Count(active) AS n_cust, Round(Avg(active),2) AS active_per
+  FROM Customer
+  GROUP BY store_id
+")
+
+```
+
+```{r}
+# calculate runtime
+microbenchmark(
+R = dbGetQuery(sakila, "
+SELECT store_id, active
+  FROM Customer
+") |> 
+  group_by(store_id) |> 
+  summarize(
+    n_cust = n(),
+    active_per = round(mean(as.numeric(active)), 2)
+  ) ,
+SQL = dbGetQuery(sakila, "
+SELECT store_id, Count(active) AS n_cust, Round(Avg(active),2) AS active_per
+  FROM Customer
+  GROUP BY store_id
+")
+)
+```
+
+### Part b
+```{r}
+# Extract tables
+staff <- dbGetQuery(sakila, "
+SELECT first_name, last_name, address_id
+  FROM staff
+")
+address <- dbGetQuery(sakila, "
+SELECT address_id, city_id
+  FROM address
+")
+city <- dbGetQuery(sakila, "
+SELECT city_id, country_id
+  FROM city
+")
+country <- dbGetQuery(sakila, "
+SELECT country_id, country
+  FROM country
+")
+
+# Merge tables and extract columns
+staff |> 
+  inner_join(address, by = "address_id") |> 
+  inner_join(city, by = "city_id") |> 
+  inner_join(country, by = "country_id") |> 
+  select(first_name, last_name, country)
+
+# SQL query
+dbGetQuery(sakila, "
+SELECT first_name, last_name, country
+  FROM staff
+    INNER JOIN address ON staff.address_id = address.address_id
+    INNER JOIN city ON address.city_id = city.city_id
+    INNER JOIN country ON city.country_id = country.country_id
+")
+```
+
+```{r}
+# calculate runtime
+microbenchmark(
+R = {staff <- dbGetQuery(sakila, "
+  SELECT first_name, last_name, address_id
+    FROM staff
+  ")
+  address <- dbGetQuery(sakila, "
+  SELECT address_id, city_id
+    FROM address
+  ")
+  city <- dbGetQuery(sakila, "
+  SELECT city_id, country_id
+    FROM city
+  ")
+  country <- dbGetQuery(sakila, "
+  SELECT country_id, country
+    FROM country
+  ")
+  staff |> 
+    inner_join(address, by = "address_id") |> 
+    inner_join(city, by = "city_id") |> 
+    inner_join(country, by = "country_id") |> 
+    select(first_name, last_name, country)},
+SQL = dbGetQuery(sakila, "
+SELECT first_name, last_name, country
+  FROM staff
+    INNER JOIN address ON staff.address_id = address.address_id
+    INNER JOIN city ON address.city_id = city.city_id
+    INNER JOIN country ON city.country_id = country.country_id
+")
+)
+```
+
+### Part c
+```{r}
+# Extract tables
+film <- dbGetQuery(sakila, "
+  SELECT title, film_id
+    FROM film
+  ")
+inventory <- dbGetQuery(sakila, "
+  SELECT film_id, inventory_id
+    FROM inventory
+  ")
+rental <-dbGetQuery(sakila, "
+  SELECT inventory_id, rental_id
+    FROM rental
+  ")
+payment <- dbGetQuery(sakila, "
+  SELECT rental_id, amount
+    FROM payment
+  ")
+# Merge tables and calculate maxima
+film |> 
+  inner_join(inventory, by = "film_id") |> 
+  inner_join(rental, by = "inventory_id") |> 
+  inner_join(payment, by = "rental_id") |> 
+  select(title, amount) |> 
+  group_by(title) |> 
+  summarize(max_title = max(amount)) |> 
+  ungroup() |> 
+  filter(max_title == max(max_title))
+
+# SQL query
+dbGetQuery(sakila, "
+WITH FilmsMaxRent AS (SELECT title, max(amount) AS max_film
+        FROM film
+          INNER JOIN inventory ON film.film_id = inventory.film_id
+          INNER JOIN rental ON inventory.inventory_id = rental.inventory_id
+          INNER JOIN payment ON rental.rental_id = payment.rental_id
+        GROUP BY title)
+SELECT title, max_film 
+  FROM FilmsMaxRent
+  WHERE max_film = (SELECT max(max_film) from FilmsMaxRent)
+")
+```
+
+```{r}
+# Calculate runtimes
+microbenchmark(
+R = {film <- dbGetQuery(sakila, "
+  SELECT title, film_id
+    FROM film
+  ")
+  inventory <- dbGetQuery(sakila, "
+    SELECT film_id, inventory_id
+      FROM inventory
+    ")
+  rental <-dbGetQuery(sakila, "
+    SELECT inventory_id, rental_id
+      FROM rental
+    ")
+  payment <- dbGetQuery(sakila, "
+    SELECT rental_id, amount
+      FROM payment
+    ")
+  film |> 
+    inner_join(inventory, by = "film_id") |> 
+    inner_join(rental, by = "inventory_id") |> 
+    inner_join(payment, by = "rental_id") |> 
+    select(title, amount) |> 
+    group_by(title) |> 
+    summarize(max_title = max(amount)) |> 
+    ungroup() |> 
+    filter(max_title == max(max_title))},
+SQL = dbGetQuery(sakila, "
+  WITH FilmsMaxRent AS (SELECT title, max(amount) AS max_film
+        FROM film
+          INNER JOIN inventory ON film.film_id = inventory.film_id
+          INNER JOIN rental ON inventory.inventory_id = rental.inventory_id
+          INNER JOIN payment ON rental.rental_id = payment.rental_id
+        GROUP BY title)
+  SELECT title, max_film 
+    FROM FilmsMaxRent
+    WHERE max_film = (SELECT max(max_film) from FilmsMaxRent)
+  ")
+)
+```
+
+## Problem 3
+
+```{r}
+data <- read.csv("data/au-500.csv")
+```
+
+### Part a
+```{r}
+websites <- data$web
+n_match <- length(grep("\\.com$", websites))
+total <- length(websites)
+paste0("The percentage of websites ending in '.com' is: ", n_match/total*100, "%.")
+```
+
+### Part b
+```{r}
+pattern <- "@[A-Za-z.]+\\.[A-Za-z]+$"
+emails <- data$email
+domains <- regmatches(emails, regexpr(pattern, emails))
+table(domains)[which.max(table(domains))]
+```
+### Part c
+```{r}
+pattern <- "[^A-Za-z, ]"
+companies <- data$company_name
+matches <- grep(pattern, companies)
+paste("The proportion of companies with a non-alphabetical, non-comma, or non-space character in the name is:", length(matches)/length(companies))
+
+pattern2 <- "[^A-Za-z,& ]" 
+matches2 <- grep(pattern2, companies)
+paste("The proportion of companies with a non-alphabetical, non-comma, non-ampersand, or non-space character in the name is:", length(matches2)/length(companies))
+```
+
+### Part d
+```{r}
+#column 1
+numbers <- data$phone1
+digits <- gsub("-", "", numbers)
+data$phone1 <- gsub("([0-9]{4})([0-9]{3})([0-9]{3})", "\\1-\\2-\\3", digits)
+head(data$phone1, 10)
+
+# column 2
+numbers <- data$phone2
+digits <- gsub("-", "", numbers)
+data$phone2 <- gsub("([0-9]{4})([0-9]{3})([0-9]{3})", "\\1-\\2-\\3", digits)
+head(data$phone2, 10)
+```
+
+### Part e
+```{r}
+pattern <- "[0-9]+$"
+addresses <- data$address
+apt_nums <- as.numeric(regmatches(addresses, regexpr(pattern, addresses)))
+hist(log(apt_nums))
+```
+
+### Part f
+```{r}
+first_dig <- as.numeric(substr(as.character(apt_nums), 1, 1))
+length(first_dig[first_dig == 1])/length(first_dig)
+length(first_dig[first_dig == 9])/length(first_dig)
+```
+:::{.callout-tip icon="false"}
+## Answer
+The data do not appear to follow Bedford's law, since the percentage of numbers with 1 as the first digit is 9.2% and the percentage of numbers with 9 as the first digit is 14.6% instead of 30% and 5% respectively. This means the data would likely not be considered real.
+:::
